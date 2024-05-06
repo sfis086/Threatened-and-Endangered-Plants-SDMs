@@ -4,7 +4,9 @@
 #                                                          #
 ##%######################################################%##
 
-# Written by: Santiago S.E. Velazco
+# Written by: Santiago S.E. Velazco & Brooke Rose
+
+setwd('H:/My Drive/12_T&E_Plants_SDMs/')
 
 # Packages and functions
 {
@@ -20,28 +22,30 @@
 
 # Useful terra and polygons
 # Study area
-studya <- terra::rast("aet.tif")
+studya <- terra::rast("data/2_env_data/01_Current/aet.tif")
 
+# environmental variables for current time period (1980-2010)
 env_variables <-
-  './bcm_v65_current_env/' %>%
+  'data/2_env_data/01_Current/' %>%
   list.files(.,patter='.tif$', full.names = TRUE) %>%
   terra::rast()
 # env_variables <- flexsdm::homogenize_na(env_variables)
 
 env_variables$aet %>% plot
 
-# CFP
-cfp <- terra::vect("C:/Users/santi/OneDrive/Documentos/FORESTAL/1-Trabajos/83-NSF_spatial_and_species_traits/3-Variables/JepsonEcoregion/JepsonRegions.shp")
+# California Jepson ecoregions
+jep <- terra::vect("data/3_shapefiles/JepsonRegions/JepsonRegions.shp")
+plot(jep, 'Region')
 
-# Databases:
-db0 <- data.table::fread('./2-AllOccurrences/0_all_raw_data.gz') %>% tibble
-unique(db0$search_name) %>% sort
+# Database:
+db0 <- data.table::fread('data/1_occurrences/cleaned_data/merged_occ.csv') %>% 
+  tibble() %>%
+  relocate(searchName) %>%
+  relocate(scientificName)
 
-# Salix and Prosopis species will be removed
-db0 <- db0 %>% dplyr::filter(!search_name%in%c("Salix nigra", "Prosopis pubescens"))
-unique(db0$search_name) %>% sort
+# HERE, feel free to select one species to work with
 
-dim(db0)
+
 ##%######################################################%##
 #                                                          #
 ####                     Filtering                      ####
@@ -55,7 +59,6 @@ ncell <-
 db0 <- tibble(db0, ncell)
 
 db0 <- db0 %>% dplyr::arrange(search_name, ncell, desc(year), data_base)
-db0 %>% dplyr::filter(search_name=='Asclepias erosa') %>%  dplyr::select(search_name, ncell, year)
 
 ##%######################################################%##
 #                                                          #
@@ -84,7 +87,7 @@ dim(db0)
 ####             Filtering by institution               ####
 #                                                          #
 ##%######################################################%##
-cal_inst <- data.table::fread("C:/Users/santi/OneDrive/Documentos/FORESTAL/1-Trabajos/83-NSF_spatial_and_species_traits/3-Variables/AuxiliaryData/CalInstitutions.txt") %>% tibble()
+cal_inst <- data.table::fread("data/2_env_data/4_AuxiliaryData/CalInstitutions.txt") %>% tibble()
 
 
 ins_buf <- terra::vect(cal_inst, geom=c('x_m', 'y_m'), crs=crs(studya))
@@ -109,7 +112,7 @@ table(is.na(db0$year))
 dbNA <- db0 %>% dplyr::filter(is.na(year))
 dbNA %>% count(search_name) %>% arrange(desc(n))
 
-db0 <- db0 %>% dplyr::filter(year>=1950)
+db0 <- db0 %>% dplyr::filter(year>=1930)
 db0 %>% count(search_name) %>% arrange(desc(n))
 plot(studya)
 points(db0$longitude_m, db0$latitude_m)
@@ -118,7 +121,7 @@ points(db0$longitude_m, db0$latitude_m)
 #                                                          #
 ####              Filtering by occurrence               ####
 ####            geographical precision (for             ####
-####         this filter NA will no be removed)         ####
+####         this filter NA will not be removed)        ####
 #                                                          #
 ##%######################################################%##
 db0$location_quality
@@ -152,7 +155,7 @@ db0 <- db0 %>% group_by(data_base) %>% mutate(IDr=paste(data_base, 1:length(data
 db0 <- db0 %>% group_by()
 
 
-plot(cfp)
+plot(jep)
 points(db0 %>%
          dplyr::select(longitude_m, latitude_m), col='red', pch=19)
 
@@ -164,14 +167,14 @@ points(db0 %>%
 ##%######################################################%##
 require(flexsdm)
 # pseudo absences database
-cfp %>% plot
+jep %>% plot
 spp <- db0$search_name %>% unique
 absences <- as.list(spp)
 names(absences) <- db0$search_name %>% unique
 
 xy <- db0 %>% dplyr::select(longitude_m, latitude_m) %>% data.frame %>% vect(geom=c("longitude_m", "latitude_m"))
 
-filt <- raster::extract(cfp, xy)[, "RegionCode"]
+filt <- raster::extract(jep, xy)[, "RegionCode"]
 head(filt)
 db0 <- mutate(db0, ecofilt=filt)
 absences_eco <- db0 %>% dplyr::select(search_name, ecofilt) %>% distinct() %>% na.omit()
@@ -183,7 +186,7 @@ for (i in 1:length(absences)) {
   print(i)
   f <-
     absences_eco %>% dplyr::filter(search_name == names(absences[i])) %>% pull(ecofilt)
-  cfp_r2 <- terra::mask(studya, cfp[cfp$RegionCode %in% f, ])
+  jep_r2 <- terra::mask(studya, jep[jep$RegionCode %in% f, ])
   pres <- db0 %>% dplyr::filter(search_name== names(absences[i]))
   set.seed(1)
   absences[[names(absences[i])]] <- flexsdm::sample_pseudoabs(
@@ -192,7 +195,7 @@ for (i in 1:length(absences)) {
     y = 'latitude_m',
     n = 10000,
     method = "random",
-    rlayer = cfp_r2
+    rlayer = jep_r2
   )
 }
 absences <- lapply(absences, data.frame)
@@ -265,9 +268,9 @@ f3 <- ggplot(rspecies, aes(search_name, sort(n))) +
   labs(y='n records', x=element_blank(), fill=element_blank()) +
   theme(legend.position = 'bottom')
 
-plot(cfp)
+plot(jep)
 f4 <- ggplot() +
-  ggspatial::layer_spatial(cfp, col='black') +
+  ggspatial::layer_spatial(jep, col='black') +
   geom_hex(data = db0, aes(longitude_m, latitude_m), bins=50) +
   scale_fill_gradientn(colours = pals::jet(15)) +
   theme_minimal()
@@ -301,8 +304,8 @@ ggsave(
 require(rasterVis)
 sp <- unique(db0$search_name)
 
-cfp_r <- terra::rasterize(cfp, studya, field="RegionCode")
-plot(cfp_r)
+jep_r <- terra::rasterize(jep, studya, field="RegionCode")
+plot(jep_r)
 
 for(i in 1:length(sp)){
   db <- db0 %>% dplyr::filter(search_name==sp[i]) %>% group_by()
@@ -310,12 +313,12 @@ for(i in 1:length(sp)){
   xy <- db %>% dplyr::select(longitude_m, latitude_m ) %>% apply(., 2, range)
 
   # base <- ggplot() +
-  #   ggspatial::layer_spatial(cfp2, col='black', fill='gray90') +
+  #   ggspatial::layer_spatial(jep2, col='black', fill='gray90') +
   #   coord_sf(xlim = xy[,1], ylim =xy[,2])
 
-  base <- terra::crop(cfp_r, ext(xy[,1], xy[,2]))
+  base <- terra::crop(jep_r, ext(xy[,1], xy[,2]))
   base0 <-
-  gplot(cfp_r) +
+  gplot(jep_r) +
     geom_tile(aes(fill = value)) +
     scale_fill_gradientn(colours=pals::parula(6), na.value = 'transparent') +
     # scale_fill_gradient(low = 'red', high = 'gray90', na.value = 'transparent') +
@@ -327,7 +330,7 @@ for(i in 1:length(sp)){
 
   a <- base0 +
     # ggplot() +
-    # ggspatial::layer_spatial(cfp2, col='black', fill='gray90') +
+    # ggspatial::layer_spatial(jep2, col='black', fill='gray90') +
     geom_point(data = db, aes(longitude_m, latitude_m), col='black', alpha=0.5) +
     theme_minimal() + theme(axis.title = element_blank(), legend.position = 'none')
 
@@ -428,12 +431,12 @@ db0 <- data.table::fread('./2-AllOccurrences/2_all_cleaned_data_final.gz') %>% t
 dim(db0)
 
 studya <- terra::rast("aet.tif")
-cfp_r <- terra::vect("C:/Users/santi/OneDrive/Documentos/FORESTAL/1-Trabajos/83-NSF_spatial_and_species_traits/3-Variables/JepsonEcoregion/JepsonRegions.shp") %>%
+jep_r <- terra::vect("C:/Users/santi/OneDrive/Documentos/FORESTAL/1-Trabajos/83-NSF_spatial_and_species_traits/3-Variables/JepsonEcoregion/JepsonRegions.shp") %>%
   terra::rasterize(., studya, field="RegionCode")
-plot(cfp_r)
+plot(jep_r)
 
 base <-
-  gplot(cfp_r) +
+  gplot(jep_r) +
   geom_tile(aes(fill = value)) +
   scale_fill_gradientn(colours=pals::parula(6), na.value = 'transparent') +
   # scale_fill_gradient(low = 'red', high = 'gray90', na.value = 'transparent') +
@@ -494,7 +497,7 @@ for(i in 1:length(sp)){
 
 
   # base <- ggplot() +
-  #   ggspatial::layer_spatial(cfp2, col='black', fill='gray90') +
+  #   ggspatial::layer_spatial(jep2, col='black', fill='gray90') +
   #   coord_sf(xlim = xy[,1], ylim =xy[,2])
   base <- terra::crop(studya, ext(xy[,1], xy[,2]))
   base <- gplot(base) +
