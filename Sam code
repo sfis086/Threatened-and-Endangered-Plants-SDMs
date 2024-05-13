@@ -1,0 +1,273 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-05-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+##%######################################################%##
+#                                                          #
+####       Occurrence data cleaning and filtering       ####
+#                                                          #
+##%######################################################%##
+
+# Written by: Santiago S.E. Velazco & Brooke Rose
+
+setwd("~/Desktop/SDMSDSU")
+
+# Packages and functions
+#{
+  require(terra)
+  require(dplyr)
+  require(data.table)
+  require(ggplot2)
+  require(ggspatial)
+  require(patchwork)
+  require(tidyr)
+  require(here)
+#}
+
+# Useful terra and polygons
+# Study area
+studya <- terra::rast("~/Desktop/SDMSDSU/01_Current/aet.tif")
+
+# environmental variables for current time period (1980-2010)
+env_variables <-
+  '~/Desktop/SDMSDSU/01_Current/' %>%
+  list.files(.,patter='.tif$', full.names = TRUE) %>%
+  terra::rast()
+  env_variables <- flexsdm::homogenize_na(env_variables)
+
+env_variables$aet %>% plot
+
+# California Jepson ecoregions
+jep <- terra::vect("~/Desktop/SDMSDSU/jepson/JepsonRegions.shp")
+plot(jep)
+
+# Database:
+db0 <- data.table::fread('~/Desktop/SDMSDSU/merged_occ.csv') %>% 
+  tibble() %>%
+  relocate(searchName) %>%
+  relocate(scientificName)
+
+# HERE, feel free to select one species to work with
+
+#db0 <- db0 %>% 
+ # filter(searchName == "Ambrosia pumila")
+
+db0 <- db0 %>% 
+  filter(searchName == "Eriastrum hooveri")
+
+##Abronia alpina 15 refs 
+##Eriastrum hooveri 1091
+#Ambrosia pumila 
+##Acanthomintha ilicifolia 135
+
+```
+
+```{r}
+##%######################################################%##
+#                                                          #
+####                     Filtering                      ####
+#                                                          #
+##%######################################################%##
+
+# Sort columns
+ncell <-
+  terra::cellFromXY(studya,
+                    db0 %>% dplyr::select(longitude_m, latitude_m) %>% as.matrix)
+db0 <- tibble(db0, ncell)
+
+                            #### Changed search name adn database to basis of record ###
+db0 <- db0 %>% dplyr::arrange(searchName, ncell, desc(year), basisOfRecord)
+
+##%######################################################%##
+#                                                          #
+####                  Filter by cell                    ####
+#                                                          #
+##%######################################################%##
+db0 <- db0 %>% group_by(searchName) %>% dplyr::filter(!duplicated(ncell))
+db0 <- db0 %>% dplyr::select(-ncell)
+db0 <- db0 %>% group_by()
+dim(db0)
+
+##%######################################################%##
+#                                                          #
+####        Filter occurrence outside study area        ####
+#                                                          #
+##%######################################################%##
+
+filt <- raster::extract(studya,
+                        db0 %>% dplyr::select(longitude_m, latitude_m) %>% data.frame)
+filt <- filt$aet
+db0 <- db0 %>% dplyr::filter(!is.na(filt))
+dim(db0)
+
+##%######################################################%##
+#                                                          #
+####             Filtering by institution               ####
+#                                                          #
+##%######################################################%##
+cal_inst <- data.table::fread("~/Desktop/SDMSDSU/CalInstitutions.txt") %>% tibble()
+
+
+ins_buf <- terra::vect(cal_inst, geom=c('x_m', 'y_m'), crs=crs(studya))
+ins_buf <- terra::buffer(ins_buf, 270*2)
+ins_buf$v <- 1
+ins_buf <- terra::aggregate(ins_buf, dissolve=TRUE, vars='v')
+
+filt <- terra::extract(ins_buf, terra::vect(db0, geom=c('longitude_m', 'latitude_m')))
+filt <- data.frame(filt)
+unique(filt$id.x)
+filt <- is.na(filt$id.x)
+sum(!filt)
+db0 <- db0[filt,]
+dim(db0)
+
+##%######################################################%##
+#                                                          #
+####                  Filter by year                    ####
+#                                                          #
+##%######################################################%##
+table(is.na(db0$year))
+dbNA <- db0 %>% dplyr::filter(is.na(year))
+dbNA %>% count(searchName) %>% arrange(desc(n))
+
+db0 <- db0 %>% dplyr::filter(year>=1930)
+db0 %>% count(searchName) %>% arrange(desc(n))
+plot(studya)
+points(db0$longitude_m, db0$latitude_m)
+
+##%######################################################%##
+#                                                          #
+####              Filtering by occurrence               ####
+####            geographical precision (for             ####
+####         this filter NA will not be removed)        ####
+#                                                          #
+##%######################################################%##
+db0$location_quality
+db0 <- db0 %>% dplyr::filter(location_quality %in% c("medium", "high", ""))
+
+
+
+```
+
+```{r}
+
+##%######################################################%##
+#                                                          #
+####     detecting potential not wild occurrences       ####
+#                                                          #
+##%######################################################%##
+
+non_wild <-
+  c('botanic',
+    'botanical',
+    'zoo',
+    'campus',
+    'cultivated',
+    'nursery',
+    'garden',
+    'campus')
+
+filt <- grepl(paste(non_wild,collapse="|"),
+              tolower(db0$location_description))
+table(filt) #38 occurrences have this words
+
+db0 <- db0 %>% dplyr::mutate(wild=!filt)
+
+# individualize each row
+db0 <- db0 %>% group_by(basisOfRecord) %>% mutate(IDr=paste(basisOfRecord, 1:length(basisOfRecord)))
+db0 <- db0 %>% group_by()
+
+
+plot(jep)
+points(db0 %>%
+         dplyr::select(longitude_m, latitude_m), col='red', pch=19)
+
+
+##%######################################################%##
+#                                                          #
+####                  Detect outliers                   ####
+#                                                          #
+##%######################################################%##
+
+require(flexsdm)
+# pseudo absences database
+jep %>% plot
+spp <- db0$searchName %>% unique
+absences <- as.list(spp)
+names(absences) <- db0$searchName %>% unique
+
+xy <- db0 %>% dplyr::select(longitude_m, latitude_m) %>% data.frame %>% vect(geom=c("longitude_m", "latitude_m"))
+
+filt <- raster::extract(jep, xy)[, "RegionCode"]
+head(filt)
+db0 <- mutate(db0, ecofilt=filt)
+absences_eco <- db0 %>% dplyr::select(searchName, ecofilt) %>% distinct() %>% na.omit()
+absences_nr <- db0 %>% count(searchName)
+i=1
+
+studya
+for (i in 1:length(absences)) {
+  print(i)
+  f <-
+    absences_eco %>% dplyr::filter(searchName == names(absences[i])) %>% pull(ecofilt)
+  jep_r2 <- terra::mask(studya, jep[jep$RegionCode %in% f, ])
+  pres <- db0 %>% dplyr::filter(searchName== names(absences[i]))
+  set.seed(1)
+  absences[[names(absences[i])]] <- flexsdm::sample_pseudoabs(
+    data = pres,
+    x = 'longitude_m',
+    y = 'latitude_m',
+    n = 10000,
+    method = "random",
+    rlayer = jep_r2
+  )
+}
+absences <- lapply(absences, data.frame)
+absences <- dplyr::bind_rows(absences, .id='searchName')
+absences <- absences %>% mutate(IDr=as.character(1:nrow(absences)))
+
+# data.table::fwrite(absences, './Pseudo_absences_for_outliers.gz')
+
+db2 <- db0 %>% select(searchName, longitude_m, latitude_m, IDr )
+db2$pr_ab <- 1
+db2 <- bind_rows(db2, absences)
+# save(db2, file = "C:/Users/santi/Documents/GitHub/spatial_sp_traits/Data/spp_pres_psabs.RData")
+
+require(flexsdm)
+db2 <- split(db2, db2$searchName)
+
+i <- 1
+out <- list()
+for(i in 1:length(db2)){
+  print(i)
+  out[[i]] <- env_outliers(da = db2[[i]],
+                           x = 'longitude_m',
+                           y = 'latitude_m',
+                           pr_ab = 'pr_ab',
+                           env_layer = env_variables[[!is.factor(env_variables)]],
+                           id = 'IDr')
+}
+
+out <- bind_rows(out)
+db0 <- bind_rows(db0)
+names(db0)
+names(out)
+db0 <-
+  left_join(db0, out, by=c('IDr', 'searchName'))
+nrow(db0)
+
+
+db0$latitude_m.y <- NULL
+db0$longitude_m.y <- NULL
+names(db0)[colnames(db0)=='latitude_m.x'] <- 'latitude_m'
+names(db0)[colnames(db0)=='longitude_m.x'] <- 'longitude_m'
+
+data.table::fwrite(db0, '~/Desktop/SDMSDSU/cleaned data output//1__cleaned_data_XXXXXname.csv')
+```
