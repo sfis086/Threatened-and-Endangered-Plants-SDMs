@@ -1,0 +1,1352 @@
+---
+title: "SAM RUN JUN 24 2024"
+output: html_document
+date: "2024-05-08"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Do environmental filtering for more species but visualize the differences between filtered and unfiltered occurrences on maps? And not necessarily just get rid of the occurrences but see how the filtering would end up impacting the datasets.
+
+#The "current" environmental variables that will be used for correcting spatial sample bias are here. I would be curious to see how the results differ when just using climate variables (aet, cwd, ppt_djf, ppt_jja, and tmn) vs. climate + soil (pct_clay, pct_sand, rock_frag, and soil_ph). 
+    # Done for one run, but only for some of them
+
+#An interesting question could be how do the resulting SDMs differ when using spatially filtered data vs. the raw presence-only?
+
+
+```
+
+```{r, echo=FALSE,  error=TRUE,  warning=TRUE}
+##%######################################################%##
+#                                                          #
+####       Occurrence data cleaning and filtering       ####
+#                                                          #
+##%######################################################%##
+
+# Written by: Santiago S.E. Velazco & Brooke Rose
+
+setwd("~/Desktop/SDMSDSU")
+
+# Packages and functions
+#{
+  require(terra)
+  require(dplyr)
+  require(data.table)
+  require(ggplot2)
+  require(ggspatial)
+  require(patchwork)
+  require(tidyr)
+  require(here)
+#}
+# Useful terra and polygons
+# Study area
+studya <- terra::rast("~/Desktop/SDMSDSU/01_Current/aet.tif")
+
+# environmental variables for current time period (1980-2010)
+env_variables <-
+  '~/Desktop/SDMSDSU/01_Current/' %>%
+  list.files(.,patter='.tif$', full.names = TRUE) %>%
+  terra::rast()
+  env_variables <- flexsdm::homogenize_na(env_variables)
+
+env_variables$aet %>% plot
+
+# California Jepson ecoregions
+jep <- terra::vect("~/Desktop/SDMSDSU/jepson/JepsonRegions.shp")
+plot(jep)
+
+# Database:
+db0 <- data.table::fread('~/Desktop/SDMSDSU/merged_occ.csv') %>% 
+  tibble() %>%
+  relocate(searchName) %>%
+  relocate(scientificName)
+
+#### rename occurenceID IDr ###
+db0 <- db0 %>%
+  rename(IDr = occurrenceID)
+
+
+# HERE, feel free to select one species to work with
+
+##### MULTISPEICES #####
+### create list with which to filter dataset from ### 
+filtered_searchNames <- db0 %>%
+  count(searchName) %>%
+  filter(n >= 30 & n <= 1500) %>%
+  pull(searchName)  # Extract unique values as a vector
+
+# Subset db0 using filtered_searchNames
+db0_subset <- db0 %>%
+  filter(searchName %in% filtered_searchNames)
+
+db0 <- db0_subset
+
+
+#### single speices ###
+#db0 <- db0 %>% 
+  #filter(searchName == "Acanthomintha ilicifolia")
+
+#db0 <- db0 %>% 
+  #filter(searchName == "Eriastrum hooveri")
+
+##Abronia alpina 15 refs 
+##Eriastrum hooveri 1091
+#Ambrosia pumila 
+##Acanthomintha ilicifolia 135
+
+```
+
+```{r, echo=FALSE,  error=TRUE,  warning=TRUE}
+##%######################################################%##
+#                                                          #
+####                     Filtering                      ####
+#                                                          #
+##%######################################################%##
+
+# Sort columns
+ncell <-
+  terra::cellFromXY(studya,
+                    db0 %>% dplyr::select(longitude_m, latitude_m) %>% as.matrix)
+
+db0 <- tibble(db0, ncell)
+
+                            #### Changed search name and database to basis of record ###
+db0 <- db0 %>% dplyr::arrange(searchName, ncell, desc(year), basisOfRecord)
+
+##%######################################################%##
+#                                                          #
+####                  Filter by cell                    ####
+#                                                          #
+##%######################################################%##
+db0 <- db0 %>% group_by(searchName) %>% dplyr::filter(!duplicated(ncell))
+db0 <- db0 %>% dplyr::select(-ncell)
+db0 <- db0 %>% group_by()
+dim(db0)
+
+##%######################################################%##
+#                                                          #
+####        Filter occurrence outside study area        ####
+#                                                          #
+##%######################################################%##
+
+filt <- raster::extract(studya,
+                        db0 %>% dplyr::select(longitude_m, latitude_m) %>% data.frame)
+filt <- filt$aet
+db0 <- db0 %>% dplyr::filter(!is.na(filt))
+dim(db0)
+
+##%######################################################%##
+#                                                          #
+####             Filtering by institution               ####
+#                                                          #
+##%######################################################%##
+cal_inst <- data.table::fread("~/Desktop/SDMSDSU/CalInstitutions.txt") %>% tibble()
+
+
+ins_buf <- terra::vect(cal_inst, geom=c('x_m', 'y_m'), crs=crs(studya))
+ins_buf <- terra::buffer(ins_buf, 270*2)
+ins_buf$v <- 1
+ins_buf <- terra::aggregate(ins_buf, dissolve=TRUE, vars='v')
+
+filt <- terra::extract(ins_buf, terra::vect(db0, geom=c('longitude_m', 'latitude_m')))
+filt <- data.frame(filt)
+unique(filt$id.x)
+filt <- is.na(filt$id.x)
+sum(!filt)
+db0 <- db0[filt,]
+dim(db0)
+
+##%######################################################%##
+#                                                          #
+####                  Filter by year                    ####
+#                                                          #
+##%######################################################%##
+table(is.na(db0$year))
+dbNA <- db0 %>% dplyr::filter(is.na(year))
+dbNA %>% count(searchName) %>% arrange(desc(n))
+
+db0 <- db0 %>% dplyr::filter(year>=1930)
+db0 %>% count(searchName) %>% arrange(desc(n))
+plot(studya)
+points(db0$longitude_m, db0$latitude_m)
+
+##%######################################################%##
+#                                                          #
+####              Filtering by occurrence               ####
+####            geographical precision (for             ####
+####         this filter NA will not be removed)        ####
+#                                                          #
+##%######################################################%##
+db0$location_quality
+db0 <- db0 %>% dplyr::filter(location_quality %in% c("medium", "high", ""))
+
+```
+
+```{r, echo=FALSE,  error=TRUE,  warning=TRUE}
+
+##%######################################################%##
+#                                                          #
+####     detecting potential not wild occurrences       ####
+#                                                          #
+##%######################################################%##
+
+
+### code for finding eerror in the XXXX ###
+##### db0 <- db0[-c(241), ] 
+
+### code to remove rows with issues  
+# Initialize vector to store invalid rows
+invalid_rows <- logical(nrow(db0))
+
+# Iterate over each string in the column
+#for (i in seq_along(db0$location_description)) {
+  ### Check if the string contains invalid characters
+#  if (any(charToRaw(db0$location_description[i]) > as.raw(127))) {
+#    invalid_rows[i] <- TRUE
+#  }
+#}
+
+#which(invalid_rows)
+
+db0 <- db0[-c(146, 292,  418,  641,  664,  829,  931, 1882, 2429, 2431, 2443, 2471, 2717), ] 
+
+non_wild <-
+  c('botanic',
+    'botanical',
+    'zoo',
+    'campus',
+    'cultivated',
+    'nursery',
+    'garden',
+    'campus')
+
+filt <- grepl(paste(non_wild,collapse="|"),
+              tolower(db0$location_description))
+table(filt) #38 occurrences have this words
+db0 <- db0 %>% dplyr::mutate(wild=!filt)
+
+# individualize each row
+db0 <- db0 %>% group_by(basisOfRecord) %>% mutate(IDr=paste(basisOfRecord, 1:length(basisOfRecord)))
+db0 <- db0 %>% group_by()
+
+
+plot(jep)
+points(db0 %>%
+         dplyr::select(longitude_m, latitude_m), col='red', pch=19)
+
+
+##%######################################################%##
+#                                                          #
+####                  Detect outliers                   ####
+#                                                          #
+##%######################################################%##
+
+require(flexsdm)
+# pseudo absences database
+jep %>% plot
+spp <- db0$searchName %>% unique
+absences <- as.list(spp)
+names(absences) <- db0$searchName %>% unique
+
+xy <- db0 %>% dplyr::select(longitude_m, latitude_m) %>% data.frame %>% vect(geom=c("longitude_m", "latitude_m"))
+
+filt <- raster::extract(jep, xy)[, "RegionCode"]
+head(filt)
+db0 <- mutate(db0, ecofilt=filt)
+absences_eco <- db0 %>% dplyr::select(searchName, ecofilt) %>% distinct() %>% na.omit()
+absences_nr <- db0 %>% count(searchName)
+i=1
+
+studya
+for (i in 1:length(absences)) {
+  print(i)
+  f <-
+    absences_eco %>% dplyr::filter(searchName == names(absences[i])) %>% pull(ecofilt)
+  jep_r2 <- terra::mask(studya, jep[jep$RegionCode %in% f, ])
+  pres <- db0 %>% dplyr::filter(searchName== names(absences[i]))
+  set.seed(1)
+  absences[[names(absences[i])]] <- flexsdm::sample_pseudoabs(
+    data = pres,
+    x = 'longitude_m',
+    y = 'latitude_m',
+    n = 10000,
+    method = "random",
+    rlayer = jep_r2
+  )
+}
+
+
+absences <- lapply(absences, data.frame)
+absences <- dplyr::bind_rows(absences, .id='searchName')
+absences <- absences %>% mutate(IDr=as.character(1:nrow(absences)))
+
+# data.table::fwrite(absences, './Pseudo_absences_for_outliers.gz')
+
+db2 <- db0 %>% select(searchName, longitude_m, latitude_m, IDr )
+db2$pr_ab <- 1
+db2 <- bind_rows(db2, absences)
+# save(db2, file = "C:/Users/santi/Documents/GitHub/spatial_sp_traits/Data/spp_pres_psabs.RData")
+
+
+
+require(flexsdm)
+db2 <- split(db2, db2$searchName)
+
+i <- 1
+out <- list()
+
+#for(i in 1:length(db2)){
+#  print(i)
+#  out[[i]] <- env_outliers(da = db2[[i]],
+#                           x = 'longitude_m',
+#                           y = 'latitude_m',
+#                           pr_ab = 'pr_ab',
+#                           env_layer = env_variables[[!is.factor(env_variables)]],
+#                           id = 'IDr')
+#}
+
+
+### FIXED CODE TO SKIP PROBLEM RUNS ###
+out <- list()  # Create an empty list to store the results
+for(i in 1:length(db2)){
+  species_name <- names(db2)[i]  # Get the name of the species
+  print(species_name)  # Print the name of the species
+  tryCatch({
+    out[[species_name]] <- env_outliers(da = db2[[i]],
+                              x = 'longitude_m',
+                              y = 'latitude_m',
+                              pr_ab = 'pr_ab',
+                              env_layer = env_variables,
+                              id = 'IDr')
+  }, error = function(e) {
+    cat("Error occurred for species:", species_name, "Skipping...\n")
+    out[[species_name]] <- NULL  # Skip the error-causing entry by assigning NULL
+  })
+}
+
+
+
+
+
+
+out <- bind_rows(out)
+db0 <- bind_rows(db0)
+names(db0)
+names(out)
+db0 <-
+  left_join(db0, out, by=c('IDr', 'searchName'))
+nrow(db0)
+
+
+db0$latitude_m.y <- NULL
+db0$longitude_m.y <- NULL
+names(db0)[colnames(db0)=='latitude_m.x'] <- 'latitude_m'
+names(db0)[colnames(db0)=='longitude_m.x'] <- 'longitude_m'
+
+data.table::fwrite(db0, '~/Desktop/SDMSDSU/cleaned data output/1_all_cleaned_data.gz') ### or .gz 
+
+```
+
+```{r, echo=FALSE, error=TRUE,  warning=TRUE}
+##%######################################################%##
+#                                                          #
+####              Some exploratory figures              ####
+#                                                          #
+##%######################################################%##
+library(ggspatial)
+library(pals)
+library(hexbin)
+dir.create('./Figures')
+
+#### rename to cleaned data output to open file ####
+db0 <- data.table::fread('./cleaned data output/1_all_cleaned_data.gz') %>% tibble
+
+# number of records by species
+rspecies <- db0 %>% group_by(searchName, basisOfRecord) %>% count %>% arrange(1)
+
+f1 <- ggplot(db0, aes(year)) + geom_histogram() + theme_minimal()
+
+f2 <- ggplot(rspecies, aes(basisOfRecord, sort(n))) +
+  geom_bar(stat = 'identity') +
+  theme_classic() +
+  coord_flip() +
+  labs(y='n records', x=element_blank(), fill=element_blank()) +
+  theme(legend.position = 'bottom')
+
+f3 <- ggplot(rspecies, aes(searchName, sort(n))) +
+  geom_bar(stat = 'identity', aes(fill=basisOfRecord)) +
+  theme_classic() +
+  coord_flip() +
+  labs(y='n records', x=element_blank(), fill=element_blank()) +
+  theme(legend.position = 'bottom')
+
+plot(jep)
+f4 <- ggplot() +
+  ggspatial::layer_spatial(jep, col='black') +
+  geom_hex(data = db0, aes(longitude_m, latitude_m), bins=5) +
+  scale_fill_gradientn(colours = pals::jet(15)) +
+  theme_minimal()
+
+ggsave(
+  plot = f3 |
+    f1 / f2,
+  filename = "./Figures/Number_of_records.png",
+  scale = 1.2,
+  width = 18,
+  height = 18,
+  units = 'cm',
+  dpi=500
+)
+
+ggsave(
+  plot = f4,
+  filename = "./Figures/Records_density.png",
+  scale = 1.2,
+  width = 18,
+  height = 18,
+  units = 'cm',
+  dpi=500
+)
+
+```
+
+```{r, echo=FALSE,  error=TRUE, warning=TRUE}
+##%######################################################%##
+#                                                          #
+####                 individual figures                 ####
+#                                                          #
+##%######################################################%##
+require(rasterVis)
+sp <- unique(db0$searchName)
+
+jep_r <- terra::rasterize(jep, studya, field="RegionCode")
+plot(jep_r)
+
+
+
+for (i in 1:length(sp)) {
+  db <- db0 %>% dplyr::filter(searchName == sp[i]) %>% group_by()
+  xy <- db %>% dplyr::select(longitude_m, latitude_m) %>% apply(., 2, range)
+  
+  # Check if the extent is empty
+  if (!any(is.na(xy)) && !any(diff(xy) == 0)) {
+    # Ensure both longitude and latitude ranges are not empty
+    
+    base <- terra::crop(jep_r, ext(xy[,1], xy[,2]))
+    
+    base0 <- gplot(jep_r) +
+      geom_tile(aes(fill = value)) +
+      scale_fill_gradientn(colours=pals::parula(6), na.value = 'transparent') +
+      coord_equal()
+    
+    base <- gplot(base) +
+      geom_tile(aes(fill = value), show.legend = FALSE) +
+      scale_fill_gradient(low = 'gray90', high = 'gray90', na.value = 'transparent') +
+      coord_equal()
+    
+    a <- base0 +
+      geom_point(data = db, aes(longitude_m, latitude_m), col='black', alpha=0.5) +
+      theme_minimal() + theme(axis.title = element_blank(), legend.position = 'none')
+    
+    b <- base +
+      geom_point(data = db, aes(longitude_m, latitude_m, col=year)) +
+      scale_color_gradientn(colours = pals::parula(15)[1:12]) +
+      theme_minimal() + theme(legend.position = 'bottom') + labs(col=element_blank()) +
+      theme(axis.title = element_blank())+labs(subtitle = 'Year')
+    
+    c <- base +
+      geom_point(data = db, aes(longitude_m, latitude_m, col=basisOfRecord)) +
+      theme_minimal() + theme(legend.position = 'bottom') + labs(col=element_blank()) +
+      theme(axis.title = element_blank())+labs(subtitle = 'Source') +
+      guides(col = guide_legend(nrow = 2))
+    
+    d <- base +
+      geom_point(data = db, aes(longitude_m, latitude_m, col=factor(.out_sum))) +
+      theme_minimal() + theme(legend.position = 'bottom') + labs(col=element_blank()) +
+      theme(axis.title = element_blank())+labs(subtitle = 'Outliers') +
+      guides(col = guide_legend(nrow = 2))
+    
+    ### added to knit ########
+    print(plot ((a + b + c + d)) +
+    plot_annotation(title = paste(sp[i], ':', nrow(db))) +
+    plot_layout(nrow = 1))
+    
+
+    ggsave(
+    plot = ((a + b + c + d)) +
+    plot_annotation(title = paste(sp[i], ':', nrow(db))) +
+    plot_layout(nrow = 1),
+    filename = paste0("./Figures/points ", sp[i], '.png'),
+    scale = 1,
+    width = 30,
+    height = 17,
+    units = 'cm',
+    dpi = 500
+  )
+
+     ### added E here ###
+     
+  } else {
+    cat("Skipping species", sp[i], "because of empty extent or only one record.\n")
+  }
+}
+
+
+
+
+
+##### Save shapefiles
+# All cleaned records
+names(db0)
+coord <-
+coord <- vect(db0 %>% dplyr::select(-year), geom=c("longitude_m", "latitude_m"), crs=crs(studya))
+plot(coord)
+terra::writeVector(coord, "./cleaned data output/1_all_cleaned_data.shp", overwrite=TRUE)
+
+
+# Cleaned records for each species
+for(i in 1:length(sp)) {
+  terra::writeVector(coord[coord$search_name == sp[i], ],
+                    paste0("./cleaned data output/", sp[i], '.shp'),
+                    overwrite = TRUE)
+}
+
+
+## not sure if this is neccesary to keep ##
+
+#source("C:/Users/santi/Dropbox/R functions/Scraping_Jepson_Herbarium.R")
+#s <- c("Asclepias erosa","Bursera microphylla","Pinus californiarum","Washingtonia filifera")
+#s2 <- jepson_url(s)
+#s3 <- jepson_info(s2)
+# readr::write_tsv(s3, './2-AllOccurrences/0_species_info.txt')
+
+
+```
+
+for(i in 1:length(sp)){ db \<- db0 %\>% dplyr::filter(searchName==sp[i])
+%\>% group_by() xy \<- db %\>% dplyr::select(longitude_m, latitude_m )
+%\>% apply(., 2, range)
+
+\# base \<- ggplot() + \# ggspatial::layer_spatial(jep2, col='black',
+fill='gray90') + \# coord_sf(xlim = xy[,1], ylim =xy[,2])
+
+base \<- terra::crop(jep_r, ext(xy[,1], xy[,2]))
+
+base0 \<- gplot(jep_r) + geom_tile(aes(fill = value)) +
+scale_fill_gradientn(colours=pals::parula(6), na.value =
+'transparent') + \# scale_fill_gradient(low = 'red', high = 'gray90',
+na.value = 'transparent') + coord_equal() base \<- gplot(base) +
+geom_tile(aes(fill = value), show.legend = FALSE) +
+scale_fill_gradient(low = 'gray90', high = 'gray90', na.value =
+'transparent') + coord_equal()
+
+a \<- base0 + \# ggplot() + \# ggspatial::layer_spatial(jep2,
+col='black', fill='gray90') + geom_point(data = db, aes(longitude_m,
+latitude_m), col='black', alpha=0.5) + theme_minimal() +
+theme(axis.title = element_blank(), legend.position = 'none')
+
+b \<- base + geom_point(data = db, aes(longitude_m, latitude_m,
+col=year)) + scale_color_gradientn(colours = pals::parula(15)[1:12]) +
+theme_minimal() + theme(legend.position = 'bottom') +
+labs(col=element_blank()) + theme(axis.title =
+element_blank())+labs(subtitle = 'Year')
+
+c \<- base + geom_point(data = db, aes(longitude_m, latitude_m,
+col=basisOfRecord)) + theme_minimal() + theme(legend.position =
+'bottom') + labs(col=element_blank()) + theme(axis.title =
+element_blank())+labs(subtitle = 'Source') + guides(col =
+guide_legend(nrow = 2))
+
+d \<- base + geom_point(data = db, aes(longitude_m, latitude_m,
+col=factor(.out_sum))) + theme_minimal() + theme(legend.position =
+'bottom') + labs(col=element_blank()) + theme(axis.title =
+element_blank())+labs(subtitle = 'Outliers') + guides(col =
+guide_legend(nrow = 2))
+
+ggsave( plot = ((a + b + c + d)) + plot_annotation(title = paste(sp[i],
+':', nrow(db))) + plot_layout(nrow = 1), filename =
+paste0("./Figures/points", sp[i], '.png'), scale = 1, width = 30, height
+= 17, units = 'cm', dpi=500 ) }
+
+
+```{r, echo=FALSE,  error=TRUE}
+##%######################################################%##
+#                                                          #
+####    Database and Figure for cleaned occurrences     ####
+#                                                          #
+##%######################################################%##
+require(terra)
+require(dplyr)
+require(data.table)
+require(ggplot2)
+require(patchwork)
+require(tidyr)
+require(here)
+
+# After the check of made by Janet I removed those records she pointed out
+###### Process manually cleaned database
+
+# Occurrence database
+    ####### rename to cleaned data output to open file ######
+
+db <- data.table::fread('./cleaned data output/1_all_cleaned_data.gz') %>% tibble
+# Occurrence database from shapefile
+  #### adding in the shapefiule from above instead of this one ### 
+#coord <- terra::vect("./2-AllOccurrences/1_all_cleaned_data_manually_revised.shp")
+coord <- terra::vect("./cleaned data output/1_all_cleaned_data.shp")
+
+dim(db)
+dim(coord)
+db <- db %>% dplyr::filter(IDr%in%coord$IDr)
+
+db %>% group_by(searchName) %>% count %>% arrange(n) %>% data.frame()
+ data.table::fwrite(db,'./cleaned data output/2_all_cleaned_data_final.gz')
+```
+
+
+```{r, echo=FALSE,  error=TRUE}
+##%######################################################%##
+#                                                          #
+####            number of records by species            ####
+#                                                          #
+##%######################################################%##
+
+require(rasterVis)
+#db0 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final.gz') %>% tibble()
+db0 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final_filtered.gz') %>% tibble()
+dim(db0)
+
+
+### added code with info ###
+#studya <- terra::rast("aet.tif")
+studya <- terra::rast("~/Desktop/SDMSDSU/01_Current/aet.tif")
+
+jep_r <- terra::vect("~/Desktop/SDMSDSU/jepson/JepsonRegions.shp") %>%
+  terra::rasterize(., studya, field="RegionCode")
+plot(jep_r)
+
+base <-
+  gplot(jep_r) +
+  geom_tile(aes(fill = value)) +
+  scale_fill_gradientn(colours=pals::parula(6), na.value = 'transparent') +
+  # scale_fill_gradient(low = 'red', high = 'gray90', na.value = 'transparent') +
+  coord_equal()
+
+rspecies <- db0 %>% group_by(searchName, basisOfRecord) %>% count %>% arrange(1)
+
+f1 <- ggplot(db0, aes(year)) + geom_histogram() + theme_minimal()
+
+f2 <- ggplot(rspecies, aes(basisOfRecord, sort(n))) +
+  geom_bar(stat = 'identity') +
+  theme_classic() +
+  coord_flip() +
+  labs(y='n records', x=element_blank(), fill=element_blank()) +
+  theme(legend.position = 'bottom')
+
+f3 <- ggplot(rspecies, aes(searchName, sort(n))) +
+  geom_bar(stat = 'identity', aes(fill=basisOfRecord)) +
+  theme_classic() +
+  coord_flip() +
+  labs(y='n records', x=element_blank(), fill=element_blank()) +
+  theme(legend.position = 'bottom')
+
+
+f4 <- base +
+  geom_point(data = db0, aes(longitude_m, latitude_m)) +
+  # scale_fill_gradientn(colours = pals::jet(15)) +
+  theme_minimal()
+f4
+
+dir.create("./FiguresCleanedOcc/try1")
+
+### added f5 here ###
+f5 <-plot ( f3 |
+    f1 / f2)
+f5
+
+print(
+ggsave(
+  plot = f3 |
+    f1 / f2,
+  filename = "./FiguresCleanedOcc/try1/Number_of_records.png",
+  scale = 1.2,
+  width = 18,
+  height = 18,
+  units = 'cm',
+  dpi=500
+)
+)
+
+ggsave(
+  plot = f4,
+  filename = "./FiguresCleanedOcc/Records_density.png",
+  scale = 1.2,
+  width = 18,
+  height = 18,
+  units = 'cm',
+  dpi=500
+)
+
+sp <- db0$searchName %>% sort %>% unique
+for(i in 1:length(sp)) {
+  db <- db0 %>% dplyr::filter(searchName == sp[i]) %>% group_by()
+  xy <- db %>% dplyr::select(longitude_m, latitude_m) %>% apply(., 2, range)
+  
+  # Check if the extent is empty
+  if (!any(is.na(xy)) && !any(diff(xy) == 0)) {
+    # Ensure both longitude and latitude ranges are not empty
+    
+    base <- terra::crop(studya, ext(xy[,1], xy[,2]))
+    base <- gplot(base) +
+      geom_tile(aes(fill = value)) +
+      scale_fill_gradient(low = 'gray90', high = 'gray90', na.value = 'transparent') +
+      coord_equal()
+    
+    c <- base +
+      geom_point(data = db, aes(longitude_m, latitude_m), col='blue') +
+      theme_minimal() + theme(legend.position = 'bottom') + labs(col=element_blank()) +
+      theme(axis.title = element_blank())+
+      guides(col = guide_legend(nrow = 2))
+    
+   print( plot  (c +
+        plot_annotation(title = paste(sp[i], ':', nrow(db)))))
+     
+     ggsave(
+      plot = c +
+        plot_annotation(title = paste(sp[i], ':', nrow(db))),
+      filename = file.path("./FiguresCleanedOcc/try1", paste0("points ", sp[i], '.png')),
+      scale = 1.2,
+      width = 16,
+      height = 16,
+      units = 'cm',
+      dpi=400
+    )
+  } else {
+    cat("Skipping species", sp[i], "because of empty extent.\n")
+  }
+}
+
+
+```
+
+sp \<- db0\$searchName %\>% sort %\>% unique for(i in 1:length(sp)){ db
+\<- db0 %\>% dplyr::filter(searchName==sp[i]) %\>% group_by()
+
+xy \<- db %\>% dplyr::select(longitude_m, latitude_m ) %\>% apply(., 2,
+range)
+
+\# base \<- ggplot() + \# ggspatial::layer_spatial(jep2, col='black',
+fill='gray90') + \# coord_sf(xlim = xy[,1], ylim =xy[,2]) base \<-
+terra::crop(studya, ext(xy[,1], xy[,2])) base \<- gplot(base) +
+geom_tile(aes(fill = value)) + scale_fill_gradient(low = 'gray90', high
+= 'gray90', na.value = 'transparent') + coord_equal()
+
+c \<- base + geom_point(data = db, aes(longitude_m, latitude_m),
+col='blue') + theme_minimal() + theme(legend.position = 'bottom') +
+labs(col=element_blank()) + theme(axis.title = element_blank())+
+guides(col = guide_legend(nrow = 2))
+
+ggsave( plot = c + plot_annotation(title = paste(sp[i], ':', nrow(db))),
+filename = file.path("./FiguresCleanedOcc", paste0("points", sp[i],
+'.png')), scale = 1.2, width = 16, height = 16, units = 'cm', dpi=400 )
+}
+
+```{r todo, eval=FALSE}
+# TODO CONTINU HERE
+##%######################################################%##
+#                                                          #
+####           Correct spatial sampling bias            ####
+#                                                          #
+##%######################################################%##
+{
+  require(flexsdm)
+  require(terra)
+  require(dplyr)
+  require(data.table)
+  require(ggplot2)
+  require(ggspatial)
+  require(patchwork)
+  require(tidyr)
+  require(here)
+}
+
+
+db0 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final.gz') %>% tibble
+
+
+
+env_variables <-
+  '01_Current//' %>%
+  list.files(.,patter='.tif$', full.names = TRUE) %>%
+  terra::rast()
+env_variables$category <- NULL
+names(env_variables)
+env_variables$terrain <- NULL # remove categorical variable
+env_variables <- flexsdm::homogenize_na(env_variables)
+
+sp_table <-
+  db0 %>%
+  group_by(searchName) %>%
+  count %>%
+  arrange(n) %>%
+  data.frame()
+sp_table <- sp_table %>% mutate(need_bias_corr = FALSE)
+sp_table[sp_table$n > 15, 3] <- TRUE
+
+sp <- sp_table %>% dplyr::filter(need_bias_corr==T) %>% pull(searchName)
+
+bin_2 <- list()
+for(i in 1:length(sp)){
+  bin_2[[i]] <- flexsdm::occfilt_env(
+    data = db0 %>% dplyr::filter(searchName == sp[i]),
+    x = "longitude_m",
+    y = "latitude_m",
+    id = "IDr",
+    env_layer = env_variables,
+    nbins = 2
+  )
+}
+names(bin_2) <- sp
+
+ data.table::fwrite(bind_rows(bin_2, .id="searchName"), './cleaned data output/2_all_cleaned_data_final_sp_filtered2bin.gz')
+
+bin_3 <- list()
+for(i in 1:length(sp)) {
+  message(paste(sp[i], i))
+  bin_3[[i]] <- occfilt_env(
+    data = db0 %>% dplyr::filter(searchName == sp[i]),
+    x = "longitude_m",
+    y = "latitude_m",
+    id = "IDr",
+    env_layer = env_variables,
+    nbins = 3
+  )
+}
+
+names(bin_3) <- sp
+ data.table::fwrite(bind_rows(bin_3, .id="searchName"), './cleaned data output/2_all_cleaned_data_final_sp_filtered3bin.gz')
+
+bin_4 <-list()
+for(i in 1:length(sp)) {
+  message(paste(sp[i], i))
+  try(bin_4[[i]] <- occfilt_env(
+    data = db0 %>% dplyr::filter(searchName == sp[i]),
+    x = "longitude_m",
+    y = "latitude_m",
+    id = "IDr",
+    env_layer = env_variables,
+    nbins = 4
+  ))
+}
+
+names(bin_4) <- sp
+ data.table::fwrite(bind_rows(bin_4, .id="searchName"), './cleaned data output/2_all_cleaned_data_final_sp_filtered4bin.gz')
+
+
+bin_6 <-list()
+for(i in 1:length(sp)) {
+  message(paste(sp[i], i))
+  try(bin_6[[i]] <- occfilt_env(
+    data = db0 %>% dplyr::filter(searchName == sp[i]),
+    x = "longitude_m",
+    y = "latitude_m",
+    id = "IDr",
+    env_layer = env_variables,
+    nbins = 6
+  ))
+}
+
+ names(bin_6) <- sp
+ data.table::fwrite(bind_rows(bin_6, .id="searchName"), './cleaned data output/2_all_cleaned_data_final_sp_filtered6bin.gz')
+
+bin_8 <-list()
+for(i in 1:length(sp)) {
+  message(paste(sp[i], i))
+  try(bin_8[[i]] <- occfilt_env(
+    data = db0 %>% dplyr::filter(searchName == sp[i]),
+    x = "longitude_m",
+    y = "latitude_m",
+    id = "IDr",
+    env_layer = env_variables,
+    nbins = 8
+  ))
+}
+
+ names(bin_8) <- sp
+ data.table::fwrite(bind_rows(bin_8, .id="searchName"), './cleaned data output/2_all_cleaned_data_final_sp_filtered8bin.gz')
+
+##%######################################################%##
+#                                                          #
+####             Autocorrelation analysis               ####
+#                                                          #
+##%######################################################%##
+require(ape)
+
+# Environmental variables
+pred <-
+  '01_Current//' %>%
+  list.files(.,patter='.tif$', full.names = TRUE) %>%
+  terra::rast()
+pred$category <- NULL # remove factors
+pred <- flexsdm::homogenize_na(pred)
+
+
+# Autocorrelation with 2 bins
+bin2 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final_sp_filtered2bin.gz') %>% tibble
+bin2.1 <- bin2 %>% group_by(searchName) %>%
+  group_split()
+
+imoran <- list()
+for(i in 1:length(bin2.1)){
+  print(i)
+  coord <- bin2.1[[i]] %>% dplyr::select(longitude_m, latitude_m)
+  data <- data.frame(terra::extract(pred, coord))[-1]
+  distm <- dist(coord)
+  distm <- as.matrix(distm)
+  distm <- 1/distm
+  diag(distm) <- 0
+  try(imoran[[i]] <-
+        apply(data, 2, function(x)
+          Moran.I(x, distm, na.rm = T)[c(1, 4)] %>% unlist) %>% data.frame() %>% as_tibble()
+  )
+  try(imoran[[i]] <- imoran[[i]][1,])
+}
+
+names(imoran) <- unique(bin2$searchName)
+imorandf <- dplyr::bind_rows(imoran, .id='searchName') %>% mutate(nbins='bin2') %>% dplyr::relocate(nbins)
+imorandf <- imorandf %>% mutate(mean_bin=apply(imorandf[, names(pred)], 1, mean))
+imorandf$nrecords <- sapply(bin2.1, nrow)
+readr::write_tsv(imorandf,here('./cleaned data output/2_filtered2bin_peformance.txt'))
+
+
+# Autocorrelation with 3 bins
+bin2 <- data.table::fread(here('cleaned data output/2_all_cleaned_data_final_sp_filtered3bin.gz')) %>% tibble
+bin2.1 <- bin2 %>% group_by(searchName) %>%
+  group_split()
+
+length(bin2.1)
+
+imoran <- list()
+for(i in 1:length(bin2.1)){
+  print(i)
+  coord <- bin2.1[[i]] %>% dplyr::select(longitude_m, latitude_m)
+  data <- data.frame(terra::extract(pred, coord))[-1]
+  distm <- dist(coord)
+  distm <- as.matrix(distm)
+  distm <- 1/distm
+  diag(distm) <- 0
+  try(imoran[[i]] <-
+        apply(data, 2, function(x)
+          Moran.I(x, distm, na.rm = T)[c(1, 4)] %>% unlist) %>% data.frame() %>% as_tibble()
+  )
+  try(imoran[[i]] <- imoran[[i]][1,])
+}
+
+names(imoran) <- unique(bin2$searchName)
+imorandf <- dplyr::bind_rows(imoran, .id='searchName') %>% mutate(nbins='bin3') %>% dplyr::relocate(nbins)
+imorandf <- imorandf %>% mutate(mean_bin=apply(imorandf[, names(pred)], 1, mean))
+imorandf$nrecords <- sapply(bin2.1, nrow)
+readr::write_tsv(imorandf,here('cleaned data output/2_filtered3bin_peformance.txt'))
+
+
+# Autocorrelation with 4 bins
+bin2 <- data.table::fread(here('cleaned data output/2_all_cleaned_data_final_sp_filtered4bin.gz')) %>% tibble
+bin2.1 <- bin2 %>% group_by(searchName) %>%
+  group_split()
+
+length(bin2.1)
+
+imoran <- list()
+for(i in 1:length(bin2.1)){
+  print(i)
+  coord <- bin2.1[[i]] %>% dplyr::select(longitude_m, latitude_m)
+  data <- data.frame(terra::extract(pred, coord))[-1]
+  distm <- dist(coord)
+  distm <- as.matrix(distm)
+  distm <- 1/distm
+  diag(distm) <- 0
+  try(imoran[[i]] <-
+        apply(data, 2, function(x)
+          Moran.I(x, distm, na.rm = T)[c(1, 4)] %>% unlist) %>% data.frame() %>% as_tibble()
+  )
+  try(imoran[[i]] <- imoran[[i]][1,])
+}
+
+names(imoran) <- unique(bin2$searchName)
+imorandf <- dplyr::bind_rows(imoran, .id='searchName') %>% mutate(nbins='bin3') %>% dplyr::relocate(nbins)
+imorandf <- imorandf %>% mutate(mean_bin=apply(imorandf[, names(pred)], 1, mean))
+imorandf$nrecords <- sapply(bin2.1, nrow)
+readr::write_tsv(imorandf,here('cleaned data output/2_filtered4bin_peformance.txt'))
+
+
+# Autocorrelation with 6 bins
+bin2 <- data.table::fread(here('cleaned data output/2_all_cleaned_data_final_sp_filtered6bin.gz')) %>% tibble
+bin2.1 <- bin2 %>% group_by(searchName) %>%
+  group_split()
+
+length(bin2.1)
+
+imoran <- list()
+for(i in 1:length(bin2.1)){
+  print(i)
+  coord <- bin2.1[[i]] %>% dplyr::select(longitude_m, latitude_m)
+  data <- data.frame(terra::extract(pred, coord))[-1]
+  distm <- dist(coord)
+  distm <- as.matrix(distm)
+  distm <- 1/distm
+  diag(distm) <- 0
+  try(imoran[[i]] <-
+        apply(data, 2, function(x)
+          Moran.I(x, distm, na.rm = T)[c(1, 4)] %>% unlist) %>% data.frame() %>% as_tibble()
+  )
+  try(imoran[[i]] <- imoran[[i]][1,])
+}
+
+names(imoran) <- unique(bin2$searchName)
+imorandf <- dplyr::bind_rows(imoran, .id='searchName') %>% mutate(nbins='bin3') %>% dplyr::relocate(nbins)
+imorandf <- imorandf %>% mutate(mean_bin=apply(imorandf[, names(pred)], 1, mean))
+imorandf$nrecords <- sapply(bin2.1, nrow)
+readr::write_tsv(imorandf,here('cleaned data output/2_filtered6bin_peformance.txt'))
+
+# Autocorrelation with 8 bins
+bin2 <- data.table::fread(here('cleaned data output/2_all_cleaned_data_final_sp_filtered8bin.gz')) %>% tibble
+bin2.1 <- bin2 %>% group_by(searchName) %>%
+  group_split()
+
+length(bin2.1)
+
+imoran <- list()
+for(i in 1:length(bin2.1)){
+  print(i)
+  coord <- bin2.1[[i]] %>% dplyr::select(longitude_m, latitude_m)
+  data <- data.frame(terra::extract(pred, coord))[-1]
+  distm <- dist(coord)
+  distm <- as.matrix(distm)
+  distm <- 1/distm
+  diag(distm) <- 0
+  try(imoran[[i]] <-
+        apply(data, 2, function(x)
+          Moran.I(x, distm, na.rm = T)[c(1, 4)] %>% unlist) %>% data.frame() %>% as_tibble()
+  )
+  try(imoran[[i]] <- imoran[[i]][1,])
+}
+
+names(imoran) <- unique(bin2$searchName)
+imorandf <- dplyr::bind_rows(imoran, .id='searchName') %>% mutate(nbins='bin3') %>% dplyr::relocate(nbins)
+imorandf <- imorandf %>% mutate(mean_bin=apply(imorandf[, names(pred)], 1, mean))
+imorandf$nrecords <- sapply(bin2.1, nrow)
+readr::write_tsv(imorandf,here('cleaned data output/2_filtered8bin_peformance.txt'))
+
+
+
+
+bindsperformance <- here('cleaned data output/') %>%
+  list.files(pattern = 'bin_peformance', full.names = TRUE) %>%
+  lapply(., readr::read_tsv)
+names(bindsperformance) <- paste0(c(2:4, 6, 8), "bin")
+
+bindsperformance <- bind_rows(bindsperformance, .id='nbins')
+
+dim(bindsperformance)
+bindsperformance <- bindsperformance %>% arrange(searchName, nbins) %>% select(nbins, searchName, mean_bin, nrecords)
+
+
+selected <- bindsperformance %>%
+  group_by(searchName) %>%
+  filter(mean_bin <= mean(mean_bin)) %>%
+  filter(nrecords == max(nrecords)) %>%
+  group_by()
+
+selected$selected <- TRUE
+bindsperformance <- left_join(bindsperformance, selected)
+bindsperformance$selected[is.na(bindsperformance$selected)] <- FALSE
+readr::write_tsv(bindsperformance, here('cleaned data output/2_bins_selected.txt'))
+
+```
+
+```{r, eval=FALSE}
+
+##%######################################################%##
+#                                                          #
+####        Final database with filtered species        ####
+#                                                          #
+##%######################################################%##
+
+binsperf <- readr::read_tsv(here('cleaned data output/2_bins_selected.txt'))  %>%
+  filter(selected) %>% arrange(nbins)
+
+selected # Only will be used 3 and 4 bind
+
+# Read occurrences databases
+db0 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final.gz') %>%
+  tibble # entire database
+
+
+# Filter bin3
+sp <- binsperf %>% filter(nbins=='3bin') %>% pull(searchName)
+db_bin3 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final_sp_filtered3bin.gz') %>%
+  tibble %>% filter(searchName %in% sp)
+
+# Filter bin4
+sp <- binsperf %>% filter(nbins=='4bin') %>% pull(searchName)
+db_bin4 <- data.table::fread('./cleaned data output/2_all_cleaned_data_final_sp_filtered4bin.gz') %>%
+  tibble %>% filter(searchName %in% sp)
+
+# # Remove filtered species from the unfiltered databases
+# db0 <- db0 %>% filter(!searchName%in%binsperf$searchName)
+
+# Merge all databases
+# db0 <- bind_rows(db0, db_bin3, db_bin4)
+db0 <- bind_rows(db_bin3, db_bin4)
+db0$searchName %>% unique %>% length()
+
+
+readr::write_tsv(db0, here('cleaned data output/2_all_cleaned_data_final_filtered.gz'))
+
+db_raw <- data.table::fread('./cleaned data output/2_all_cleaned_data_final.gz') %>% tibble # entire database
+
+db_filt <- readr::read_tsv(here('cleaned data output/2_all_cleaned_data_final_filtered.gz'))
+
+db_raw %>% group_by(searchName) %>% count()
+db_filt %>% group_by(searchName) %>% count()
+
+
+```
+
+```{r}
+
+## %######################################################%##
+#                                                          #
+####                   3-Pre-modeling                   ####
+#                                                          #
+## %######################################################%##
+{
+  require(dplyr)
+  require(terra)
+  require(flexsdm)
+  require(here)
+  require(progress)
+}
+
+
+## %######################################################%##
+#                                                          #
+####             Create directory structure             ####
+#                                                          #
+## %######################################################%##
+
+dir <- flexsdm::sdm_directory(
+  main_dir = file.path(getwd(), "3-Models"),
+  projections = list.dirs("C~/Desktop/SDMSDSU/3-Variables/JepsonEcoregion", recursive = FALSE) %>% basename(),
+  calibration_area = TRUE,
+  algorithm = c("gam", "gau", "gbm", "glm", "max", "net", "raf", "svm", "meanthr"),
+  ensemble = NULL,
+  threshold = FALSE,
+  return_vector = TRUE
+)
+# dir[1] %>% fs::dir_tree(., recurse = TRUE)
+dir %>% head()
+
+
+# projections = list.dirs("C:/Users/santi/OneDrive/Documentos/FORESTAL/1-Trabajos/83-NSF_spatial_and_species_traits/3-Variables/Predictors/Future_CFP", recursive = FALSE) %>% basename(),
+
+```
+
+```{r}
+
+## %######################################################%##
+#                                                          #
+####                  Calibration area                  ####
+#                                                          #
+## %######################################################%##
+
+# Unfiltered occurrence database
+unfilt_occ <- data.table::fread(here("cleaned data output/2_all_cleaned_data_final.gz")) %>% tibble()
+
+unfilt_occ <- unfilt_occ %>% select(id = IDr, species = searchName, x = longitude_m, y = latitude_m, year)
+
+# Filtered occurrence database (used for modeling)
+occ <- readr::read_tsv(here("cleaned data output/2_all_cleaned_data_final_filtered.gz"))
+occ <- occ %>% select(id = IDr, species = searchName, x = longitude_m, y = latitude_m)
+
+# Jepson ecoregion
+cfp <- terra::vect("~/Desktop/SDMSDSU/3-Variables/JepsonEcoregion/JepsonRegions.shp")
+cfp$Region <- NULL
+
+# Process species
+sp <- unfilt_occ$species %>%
+  unique() %>%
+  sort()
+
+for (i in 1:length(sp)) {
+  x2 <-
+    flexsdm::calib_area(
+      data = unfilt_occ[unfilt_occ$species == sp[i], ],
+      x = "x",
+      y = "y",
+      method = c("mask", cfp, "RegionCode")
+    )
+  x2$Region <- NULL
+  terra::writeVector(x2, file.path(grep("Calibration", dir, value = TRUE), paste0(sp[i], ".shp")), overwrite = TRUE)
+}
+rm(unfilt_occ)
+
+## %######################################################%##
+#                                                          #
+####                 Data partitioning                  ####
+#                                                          #
+## %######################################################%##
+# Raterize CFP database
+ #### dump current CA projections into here ###
+#pred <-
+  file.path(getwd(), "3-Models/1_Inputs/2_Predictors/1_Current") %>%
+  list.files(., pattern = ".tif$", full.names = TRUE) %>%
+  terra::rast()
+# pred <- homogenize_na(pred)
+
+cfp_r <- rasterize(cfp, pred$aet, field = "RegionCode")
+cfp_r[] <- as.numeric(cfp_r[])
+
+# Extract ecoregion value
+occ$region <- terra::extract(cfp_r, occ[, c("x", "y")])[, "RegionCode"]
+occ <- occ %>% filter(!is.na(region))
+occ$pr_ab <- 1
+
+# Block partition for species with > 30 presences
+nr <- occ %>% count(species)
+sp <- nr$species[nr$n > 30]
+
+pred <- pred[[!names(pred) %in% "category"]]
+names(pred)
+part <- list()
+for (i in 1:length(sp)) {
+  print(i)
+  part[[i]] <-
+    flexsdm::part_sblock(
+      env_layer = pred,
+      data = occ %>% filter(species == sp[i]),
+      x = "x",
+      y = "y",
+      pr_ab = "pr_ab",
+      n_part = 4, # four blocks
+      min_res_mult = 50,
+      max_res_mult = 300,
+      num_grids = 30,
+      min_occ = 10,
+      prop = 0.5
+    )
+}
+names(part) <- sp
+
+# Species without good partition
+sp <- names(which(sapply(part, function(x) is.null(names(x)))))
+sp # Partition were found for all species
+
+part <- part[sapply(part, length) == 3]
+
+# saver block partition details and rasters
+best_part_info <- bind_rows(lapply(part, function(x) x$best_part_info), .id = "species")
+occ_part <- bind_rows(lapply(part, function(x) x$part), .id = "species")
+occ_part %>%
+  group_by(species, .part) %>%
+  count() %>%
+  filter(n == min(n))
+
+data.table::fwrite(best_part_info, file.path(dir[3], "best_part_info_block.gz"))
+data.table::fwrite(occ_part, file.path(dir[3], "occ_part_block.gz"))
+
+
+blocks <- lapply(part, function(x) {
+  get_block(pred$aet, x$grid)
+})
+blocks <- rast(blocks)
+names(blocks) <- names(part)
+writeRaster(blocks, file.path(dir[3], paste0('part_',names(blocks), ".tif")))
+
+```
+
+```{r}
+
+## %######################################################%##
+#                                                          #
+####    Create pseudo_absences and background points    ####
+####      for species with geographical partition       ####
+#                                                          #
+## %######################################################%##
+# Partition layer
+part <- list.files(here("3-Models/1_Inputs/1_Occurrences"), pattern = ".tif", full.names = TRUE)
+names(part) <- gsub(".tif$", "", gsub("part_", "", basename(part)))
+# Calibration areas
+clibarea <- list.files(here("3-Models/1_Inputs/3_Calibration_area"), pattern = ".shp$", full.names = TRUE)
+names(clibarea) <- gsub(".shp$", "", gsub("part_", "", basename(clibarea)))
+# Occurrences
+occ_part <- list.files(here("3-Models/1_Inputs/1_Occurrences"), patter = "occ_part", full.names = TRUE)
+occ_part <- lapply(occ_part, function(x) data.table::fread(x) %>% tibble())
+occ_part <- bind_rows(occ_part)
+occ_part$species %>% unique()
+
+sp <- names(part)
+db_bg <- db_pa <- list() # object to store ps-abs and bgp
+
+
+for (i in 1:length(sp)) {
+  print(i)
+  coord <- occ_part %>%
+    dplyr::filter(species == sp[i]) %>%
+    dplyr::select(x, y, .part)
+  r <- terra::rast(part[sp[i]])
+  v <- terra::vect(clibarea[[sp[i]]])
+  r <- r %>%
+    crop(., v) %>%
+    mask(., v)
+  part_n <- coord$.part %>%
+    table() %>%
+    c()
+  abs <- lapply(names(part_n), function(x) {
+    flexsdm::sample_pseudoabs(
+      data = coord,
+      x = "x",
+      y = "y",
+      n = part_n[x],
+      method = c("geo_const", width = "5000"),
+      rlayer = r,
+      maskval = as.numeric(x)
+    )
+  })
+  names(abs) <- names(part_n)
+  abs <- bind_rows(abs, .id = ".part") %>% dplyr::mutate(.part = as.numeric(.part))
+
+  db_pa[[i]] <- abs %>% select(x, y, pr_ab, .part)
+
+  abs <- lapply(names(part_n), function(x) {
+    flexsdm::sample_background(
+      data = coord,
+      x = "x",
+      y = "y",
+      n = round(10000 / length(part_n)),
+      method = "random",
+      rlayer = r,
+      maskval = as.numeric(x)
+    )
+  })
+  names(abs) <- names(part_n)
+  abs <- bind_rows(abs, .id = ".part") %>% dplyr::mutate(.part = as.numeric(.part))
+
+  db_bg[[i]] <- abs %>% select(x, y, pr_ab, .part)
+}
+
+names(db_pa) <- names(db_bg) <- sp
+bind_rows(db_pa, .id = "species")
+db_bg <- bind_rows(db_bg, .id = "species")
+db_pa <- bind_rows(db_pa, .id = "species")
+
+occ_part <- bind_rows(occ_part, db_pa) %>% arrange(species, desc(pr_ab))
+
+data.table::fwrite(occ_part, file.path("3-Models/1_Inputs/1_Occurrences", "1_occ_presabs_geopart.gz"))
+data.table::fwrite(db_bg, file.path("3-Models/1_Inputs/1_Occurrences", "1_occ_bkground_geopart.gz"))
+
+```
